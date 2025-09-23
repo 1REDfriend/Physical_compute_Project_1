@@ -1,82 +1,134 @@
 #include "ringbuffer.h"
 #include <stdlib.h>
 #include <string.h>
-#include <SDL.h>
+#include <SDL2/SDL.h> 
 
-typedef struct ringbuffer {
-    uint8_t* data;
-    size_t   cap;
-    size_t   head; // write pos
-    size_t   tail; // read pos
-    size_t   sz;
-    SDL_mutex* mu;
+// Ring buffer implementation with thread safety
+typedef struct ringbuffer
+{
+    uint8_t *data;
+    size_t capacity;
+    size_t head;
+    size_t tail;
+    size_t size;
+    SDL_mutex *mutex;
 } ringbuffer_t;
 
-ringbuffer_t* rb_create(size_t capacity) {
-    ringbuffer_t* rb = (ringbuffer_t*)calloc(1, sizeof(*rb));
-    if (!rb) return NULL;
-    rb->data = (uint8_t*)malloc(capacity);
-    if (!rb->data) { free(rb); return NULL; }
-    rb->cap = capacity;
-    rb->mu = SDL_CreateMutex();
-    if (!rb->mu) { free(rb->data); free(rb); return NULL; }
+ringbuffer_t *rb_create(size_t capacity)
+{
+    ringbuffer_t *rb = (ringbuffer_t *)calloc(1, sizeof(ringbuffer_t));
+    if (!rb)
+        return NULL;
+
+    rb->data = (uint8_t *)malloc(capacity);
+    if (!rb->data)
+    {
+        free(rb);
+        return NULL;
+    }
+
+    rb->capacity = capacity;
+    rb->head = 0;
+    rb->tail = 0;
+    rb->size = 0;
+    rb->mutex = SDL_CreateMutex();
+
+    if (!rb->mutex)
+    {
+        free(rb->data);
+        free(rb);
+        return NULL;
+    }
+
     return rb;
 }
 
-void rb_destroy(ringbuffer_t* rb) {
-    if (!rb) return;
-    if (rb->mu) SDL_DestroyMutex(rb->mu);
-    free(rb->data);
+void rb_destroy(ringbuffer_t *rb)
+{
+    if (!rb)
+        return;
+
+    if (rb->mutex)
+    {
+        SDL_DestroyMutex(rb->mutex);
+    }
+
+    if (rb->data)
+    {
+        free(rb->data);
+    }
+
     free(rb);
 }
 
-size_t rb_capacity(ringbuffer_t* rb) {
-    return rb ? rb->cap : 0;
-}
+size_t rb_push(ringbuffer_t *rb, const uint8_t *data, size_t n)
+{
+    if (!rb || !data || n == 0)
+        return 0;
 
-size_t rb_size(ringbuffer_t* rb) {
-    if (!rb) return 0;
-    SDL_LockMutex(rb->mu);
-    size_t s = rb->sz;
-    SDL_UnlockMutex(rb->mu);
-    return s;
-}
+    SDL_LockMutex(rb->mutex);
 
-void rb_clear(ringbuffer_t* rb) {
-    if (!rb) return;
-    SDL_LockMutex(rb->mu);
-    rb->head = rb->tail = rb->sz = 0;
-    SDL_UnlockMutex(rb->mu);
-}
+    size_t available = rb->capacity - rb->size;
+    size_t to_write = (n > available) ? available : n;
 
-static size_t _min(size_t a, size_t b) { return a < b ? a : b; }
+    for (size_t i = 0; i < to_write; i++)
+    {
+        rb->data[rb->tail] = data[i];
+        rb->tail = (rb->tail + 1) % rb->capacity;
+        rb->size++;
+    }
 
-size_t rb_push(ringbuffer_t* rb, const uint8_t* data, size_t n) {
-    if (!rb || !data || n == 0) return 0;
-    SDL_LockMutex(rb->mu);
-    size_t space = rb->cap - rb->sz;
-    size_t to_write = _min(space, n);
-    size_t first = _min(to_write, rb->cap - rb->head);
-    memcpy(rb->data + rb->head, data, first);
-    size_t second = to_write - first;
-    if (second) memcpy(rb->data + 0, data + first, second);
-    rb->head = (rb->head + to_write) % rb->cap;
-    rb->sz += to_write;
-    SDL_UnlockMutex(rb->mu);
+    SDL_UnlockMutex(rb->mutex);
+
     return to_write;
 }
 
-size_t rb_pop(ringbuffer_t* rb, uint8_t* out, size_t n) {
-    if (!rb || !out || n == 0) return 0;
-    SDL_LockMutex(rb->mu);
-    size_t avail = rb->sz;
-    size_t to_read = _min(avail, n);
-    size_t first = _min(to_read, rb->cap - rb->tail);
-    memcpy(out, rb->data + rb->tail, first);
-    size_t second = to_read - first;
-    if (second) memcpy(out + first, rb->data + 0, second);
-    rb->tail = (rb->tail + to_read) % rb->cap;
-    rb->sz -= to_read;
-    SDL_UnlockMutex(rb->mu);
+size_t rb_pop(ringbuffer_t *rb, uint8_t *out, size_t n)
+{
+    if (!rb || !out || n == 0)
+        return 0;
+
+    SDL_LockMutex(rb->mutex);
+
+    size_t to_read = (n > rb->size) ? rb->size : n;
+
+    for (size_t i = 0; i < to_read; i++)
+    {
+        out[i] = rb->data[rb->head];
+        rb->head = (rb->head + 1) % rb->capacity;
+        rb->size--;
+    }
+
+    SDL_UnlockMutex(rb->mutex);
+
     return to_read;
+}
+
+size_t rb_size(ringbuffer_t *rb)
+{
+    if (!rb)
+        return 0;
+
+    SDL_LockMutex(rb->mutex);
+    size_t size = rb->size;
+    SDL_UnlockMutex(rb->mutex);
+
+    return size;
+}
+
+size_t rb_capacity(ringbuffer_t *rb)
+{
+    return rb ? rb->capacity : 0;
+}
+
+void rb_clear(ringbuffer_t *rb)
+{
+    if (!rb)
+        return;
+
+    SDL_LockMutex(rb->mutex);
+    rb->head = 0;
+    rb->tail = 0;
+    rb->size = 0;
+    SDL_UnlockMutex(rb->mutex);
 }

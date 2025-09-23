@@ -1,6 +1,9 @@
-// src/nk_impl.c
-// หน่วยคอมไพล์สำหรับ "นิยาม" ฟังก์ชันของ Nuklear + SDL_GL3 backend
+// Nuklear implementation file
+// Include necessary headers
+#include <stddef.h>
+#include <stdint.h>
 
+// Define types before including nuklear.h to fix static asserts
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
 #define NK_INCLUDE_STANDARD_VARARGS
@@ -11,7 +14,5 @@
 
 #define NK_IMPLEMENTATION
 #define NK_SDL_GL3_IMPLEMENTATION
-
-#include <glad/glad.h>
 #include "nuklear.h"
 #include "nuklear_sdl_gl3.h"

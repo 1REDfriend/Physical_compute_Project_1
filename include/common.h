@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define APP_NAME "FTDI + SDL2 + Nuklear Demo"
+#define APP_NAME "FTDI + SDL3 + Nuklear Demo"
 #define APP_VERSION "0.1.0"
 
 // Utility macros
