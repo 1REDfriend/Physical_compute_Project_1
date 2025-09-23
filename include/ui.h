@@ -9,9 +9,19 @@
 extern "C" {
 #endif
 
+// UI Page enumeration
+typedef enum {
+    UI_PAGE_OBD_VIEWER = 0,    // หน้า OBD-II Data Viewer
+    UI_PAGE_USB_READER = 1,    // หน้า USB Data Reader  
+    UI_PAGE_USB_WRITER = 2     // หน้า USB Data Writer
+} ui_page_t;
+
 typedef struct app_ui {
     worker_t* worker;
     int       want_quit;
+    
+    // Current page
+    ui_page_t current_page;
 
     // UI state
     int driver_select;   // 0=stub, 1=d2xx
@@ -21,6 +31,18 @@ typedef struct app_ui {
     // Enumerated devices (read-only list for display)
     ftdi_device_info_t devlist[32];
     int                dev_count;
+    
+    // USB Reader page state
+    int selected_reader_device;
+    int reader_connected;
+    char reader_output[4096];
+    
+    // USB Writer page state  
+    int selected_writer_device;
+    int writer_connected;
+    char checksum_input[32];
+    char offset_input[32];
+    char writer_output[4096];
 } app_ui_t;
 
 void ui_init(app_ui_t* ui, worker_t* w);
