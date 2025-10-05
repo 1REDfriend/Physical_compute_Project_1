@@ -253,6 +253,7 @@ void loop() {
   // Discover supported PIDs across ranges 0x00, 0x20, 0x40, 0x60, 0x80
   const uint8_t bases[] = {0x00, 0x20, 0x40, 0x60, 0x80};
   for (uint8_t b : bases) {
+    net_poll_clients();
     uint8_t bits[4] = {0,0,0,0};
     if (!get_supported_block(b, bits)) {
       Serial.printf("Base 0x%02X: no supported map (skip)\n", b);
@@ -277,6 +278,4 @@ void loop() {
   }
 
   Serial.println("Scan cycle complete. Sleeping 2s...\n");
-  net_poll_clients();
-  delay(2000);
 }
