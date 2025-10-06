@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <stdarg.h>  // for va_list
 
+// -------- Wi-Fi AP config --------
 static const char* AP_SSID = "ESP32-OBD";
 static const char* AP_PASS = "12345678";     // >= 8 chars
 static const IPAddress AP_IP(192,168,4,1);
@@ -10,6 +12,52 @@ static const uint16_t TCP_PORT = 3333;
 
 WiFiServer obdServer(TCP_PORT);
 WiFiClient clients[4]; // up to 4 telnet/CLI readers
+
+// -------- K-Line wiring (through a proper transceiver!) --------
+// ESP32 <-> K-Line transceiver (e.g., L9637/MC33290)
+static const int K_TX_PIN = 16;   // ESP32 TX -> Transceiver TXD
+static const int K_RX_PIN = 17;   // ESP32 RX <- Transceiver RXD
+
+// UART1 on ESP32
+HardwareSerial KLine(1);
+
+// -------- Timing --------
+static const uint32_t K_BAUD = 10400;   // ISO9141/14230 common rate
+static const uint32_t REQ_GAP_MS = 55;  // gap between requests
+static const uint32_t BYTE_TIMEOUT_MS = 40;   // per-byte timeout guard
+static const uint32_t FRAME_TIMEOUT_MS = 300; // overall frame guard
+static const uint32_t IDLE_GAP_MS = 25;       // end-of-frame idle gap
+
+// -------- ISO 9141 3-byte header (functional addressing) --------
+static const uint8_t HDR0 = 0x68; // Target (ECU)
+static const uint8_t HDR1 = 0x11; // Source (tester functional)
+static const uint8_t HDR2 = 0xF1; // Tester address
+
+// ===================================================================================
+// Networking helpers
+// ===================================================================================
+static void net_broadcast(const char* s) {
+  for (int i = 0; i < 4; ++i) {
+    if (clients[i] && clients[i].connected()) clients[i].print(s);
+  }
+}
+
+static void net_broadcastf(const char* fmt, ...) {
+  char buf[256];
+  va_list ap; va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  net_broadcast(buf);
+}
+
+static void logf(const char* fmt, ...) {
+  char buf[256];
+  va_list ap; va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Serial.print(buf);
+  net_broadcast(buf);
+}
 
 void net_begin_ap() {
   WiFi.persistent(false);
@@ -22,7 +70,7 @@ void net_begin_ap() {
 }
 
 void net_poll_clients() {
-  // accept new client if there is one
+  // accept a new client if there is one
   if (obdServer.hasClient()) {
     WiFiClient c = obdServer.available();
     if (c) {
@@ -44,42 +92,19 @@ void net_poll_clients() {
   }
 }
 
-static void net_broadcast(const char* s) {
-  for (int i = 0; i < 4; ++i)
-    if (clients[i] && clients[i].connected()) clients[i].print(s);
-}
-
-static void net_broadcastf(const char* fmt, ...) {
-  char buf[256];
-  va_list ap; va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  net_broadcast(buf);
-}
-
-// ---------- Wiring (change pins if needed) ----------
-static const int K_TX_PIN = 17;   // ESP32 TX to K-Line transceiver TXD
-static const int K_RX_PIN = 16;   // ESP32 RX from K-Line transceiver RXD
-
-// UART1 on ESP32
-HardwareSerial KLine(1);
-
-// ---------- Timing ----------
-static const uint32_t K_BAUD = 10400;   // ISO9141/14230 common rate
-static const uint32_t REQ_GAP_MS = 55;  // gap between requests
-static const uint32_t BYTE_TIMEOUT_MS = 40;
-static const uint32_t FRAME_TIMEOUT_MS = 200;
-
-// ---------- ISO 9141 3-byte header (common functional addressing) ----------
-static const uint8_t HDR0 = 0x68; // Target (ECU)
-static const uint8_t HDR1 = 0x6A; // Source (tester functional)
-static const uint8_t HDR2 = 0xF1; // Tester address
-
-// ---------- Utils ----------
-static uint8_t checksum8(const uint8_t *buf, size_t n) {
+// ===================================================================================
+/* Utils */
+// ===================================================================================
+static uint8_t checksum8(const uint8_t *buf, size_t n_without_cs) {
   uint16_t sum = 0;
-  for (size_t i = 0; i < n; ++i) sum += buf[i];
+  for (size_t i = 0; i < n_without_cs; ++i) sum += buf[i];
   return (uint8_t)(sum & 0xFF);
+}
+
+static bool verify_checksum(const uint8_t *buf, size_t n_with_cs) {
+  if (n_with_cs < 2) return false;
+  uint8_t cs = buf[n_with_cs - 1];
+  return checksum8(buf, n_with_cs - 1) == cs;
 }
 
 // Read one byte with timeout
@@ -91,21 +116,27 @@ bool k_read_byte(uint8_t &b, uint32_t t_byte_ms = BYTE_TIMEOUT_MS) {
   return false;
 }
 
-// Read a response frame with basic pattern: resp header + 0x40|svc + pid + data... + cs
-// Store into out[], return length. Very simple framing: read until idle gap or max.
+// Read a frame using inter-byte idle gap and overall guard timeout.
+// Returns the captured length (0 if nothing).
 size_t k_read_frame(uint8_t *out, size_t max_len) {
   size_t n = 0;
-  uint32_t t0 = millis();
-  while ((millis() - t0) < FRAME_TIMEOUT_MS) {
+  uint32_t t_start = millis();
+  uint32_t last_rx = millis();
+  bool got_any = false;
+
+  while ((millis() - t_start) < FRAME_TIMEOUT_MS) {
     while (KLine.available()) {
       if (n < max_len) out[n++] = (uint8_t)KLine.read();
-      t0 = millis(); // extend while we keep receiving
+      last_rx = millis();
+      got_any = true;
     }
+    // end of frame when we had data and idle gap exceeds threshold
+    if (got_any && (millis() - last_rx) > IDLE_GAP_MS) break;
   }
   return n;
 }
 
-// Send a simple 5-byte request [HDR0 HDR1 HDR2 SVC PID CS]
+// Send a simple 6-byte request [HDR0 HDR1 HDR2 SVC PID CS]
 void k_send_req(uint8_t svc, uint8_t pid) {
   uint8_t f[6];
   f[0] = HDR0; f[1] = HDR1; f[2] = HDR2; f[3] = svc; f[4] = pid;
@@ -115,14 +146,14 @@ void k_send_req(uint8_t svc, uint8_t pid) {
 }
 
 // Very simple fast-init pulse (optional). Some ECUs need this before talking.
-// NOTE: Depending on the transceiver, logic may be non-inverted or inverted.
+// NOTE: Depending on the transceiver, logic may be inverted/non-inverted.
 // If it doesn't wake ECU, comment this out and use proper 5-baud init instead.
 void kline_fast_init_pulse() {
   KLine.end();                  // Release UART so we can bit-bang TX pin
   pinMode(K_TX_PIN, OUTPUT);
   digitalWrite(K_TX_PIN, HIGH); // idle
   delay(100);
-  // K-line fast init: 25ms LOW, 25ms HIGH, then wait ~200ms (per ISO 14230 "fast init")
+  // KWP2000 fast init: 25ms LOW, 25ms HIGH, then wait ~200ms
   digitalWrite(K_TX_PIN, LOW);
   delay(25);
   digitalWrite(K_TX_PIN, HIGH);
@@ -134,26 +165,24 @@ void kline_fast_init_pulse() {
 
 // Parse/print common Mode 1 PIDs
 void print_pid_decoded(uint8_t pid, const uint8_t *data, size_t n) {
-  // data points to the bytes after [resp header, 0x40|svc, pid]
-  // most Mode 01 replies are 1..4 bytes. Guard checks:
   auto u16 = [&](int i){ return (uint16_t)data[i] << 8 | data[i+1]; };
 
   switch (pid) {
-    case 0x04: if (n>=1) Serial.printf("Load: %.1f %%\n", data[0]*100.0/255.0); break;
-    case 0x05: if (n>=1) Serial.printf("Coolant Temp: %d C\n", (int)data[0]-40); break;
-    case 0x0C: if (n>=2) Serial.printf("RPM: %.0f rpm\n", u16(0)/4.0); break;
-    case 0x0D: if (n>=1) Serial.printf("Speed: %d km/h\n", data[0]); break;
-    case 0x0F: if (n>=1) Serial.printf("Intake Air Temp: %d C\n", (int)data[0]-40); break;
-    case 0x10: if (n>=2) Serial.printf("MAF: %.2f g/s\n", u16(0)/100.0); break;
-    case 0x11: if (n>=1) Serial.printf("Throttle: %.1f %%\n", data[0]*100.0/255.0); break;
-    case 0x2F: if (n>=1) Serial.printf("Fuel Level: %.1f %%\n", data[0]*100.0/255.0); break;
-    case 0x33: if (n>=1) Serial.printf("Baro Pressure: %d kPa\n", data[0]); break;
-    case 0x46: if (n>=1) Serial.printf("Ambient Temp: %d C\n", (int)data[0]-40); break;
-    case 0x5E: if (n>=2) Serial.printf("Engine Fuel Rate: %.2f L/h\n", u16(0)/20.0); break;
+    case 0x04: if (n>=1) logf("Load: %.1f %%\n", data[0]*100.0/255.0); break;
+    case 0x05: if (n>=1) logf("Coolant Temp: %d C\n", (int)data[0]-40); break;
+    case 0x0C: if (n>=2) logf("RPM: %.0f rpm\n", u16(0)/4.0); break;
+    case 0x0D: if (n>=1) logf("Speed: %d km/h\n", data[0]); break;
+    case 0x0F: if (n>=1) logf("Intake Air Temp: %d C\n", (int)data[0]-40); break;
+    case 0x10: if (n>=2) logf("MAF: %.2f g/s\n", u16(0)/100.0); break;
+    case 0x11: if (n>=1) logf("Throttle: %.1f %%\n", data[0]*100.0/255.0); break;
+    case 0x2F: if (n>=1) logf("Fuel Level: %.1f %%\n", data[0]*100.0/255.0); break;
+    case 0x33: if (n>=1) logf("Baro Pressure: %d kPa\n", data[0]); break;
+    case 0x46: if (n>=1) logf("Ambient Temp: %d C\n", (int)data[0]-40); break;
+    case 0x5E: if (n>=2) logf("Engine Fuel Rate: %.2f L/h\n", u16(0)/20.0); break;
     default: {
-      Serial.printf("PID 0x%02X (raw):", pid);
-      for (size_t i=0;i<n;i++) Serial.printf(" %02X", data[i]);
-      Serial.println();
+      logf("PID 0x%02X (raw):", pid);
+      for (size_t i=0;i<n;i++) logf(" %02X", data[i]);
+      logf("\n");
     } break;
   }
 }
@@ -161,19 +190,25 @@ void print_pid_decoded(uint8_t pid, const uint8_t *data, size_t n) {
 // Send Mode 01 + pid, read and print decoded value
 bool request_mode01_and_print(uint8_t pid) {
   // drain any stale bytes
-  while (KLine.available()) KLine.read();
+  while (KLine.available()) (void)KLine.read();
+
   k_send_req(0x01, pid);
   delay(REQ_GAP_MS);
 
   uint8_t buf[64];
   size_t n = k_read_frame(buf, sizeof(buf));
   if (n < 6) {
-    Serial.printf("PID 0x%02X: no/short reply (n=%u)\n", pid, (unsigned)n);
+    logf("PID 0x%02X: no/short reply (n=%u)\n", pid, (unsigned)n);
     return false;
   }
 
+  // If long enough, check checksum
+  if (n >= 6 && !verify_checksum(buf, n)) {
+    logf("PID 0x%02X: checksum mismatch, n=%u\n", pid, (unsigned)n);
+    // continue anyway but warn
+  }
+
   // Find pattern: [xx xx xx] [0x41] [pid] [data...] [cs]
-  // Some ECUs use 3-byte resp header; we’ll scan to find 0x41 and pid.
   int idx = -1;
   for (size_t i=0;i+2<n;i++) {
     if (buf[i] == 0x41 && buf[i+1] == pid) { idx = (int)i; break; }
@@ -185,32 +220,39 @@ bool request_mode01_and_print(uint8_t pid) {
     }
   }
   if (idx < 0) {
-    Serial.printf("PID 0x%02X: unrecognized reply:", pid);
-    for (size_t i=0;i<n;i++) Serial.printf(" %02X", buf[i]);
-    Serial.println();
+    logf("PID 0x%02X: unrecognized reply:", pid);
+    for (size_t i=0;i<n;i++) logf(" %02X", buf[i]);
+    logf("\n");
     return false;
   }
 
-  // Data bytes are everything after [0x41, pid] up to last byte minus checksum if present.
-  // We won't strictly verify checksum across all header variants here; we just trim last byte as cs if long enough.
+  // Data bytes are everything after [0x41, pid] up to last byte minus checksum (if present).
   int data_start = idx + 2;
   int data_end   = (int)n - 1; // assume last is checksum
-  int data_len   = max(0, data_end - data_start);
-  print_pid_decoded(pid, &buf[data_start], data_len);
+  if (data_end < data_start) data_end = data_start;
+  int data_len   = (data_end - data_start);
+  if (data_len < 0) data_len = 0;
+
+  print_pid_decoded(pid, &buf[data_start], (size_t)data_len);
   return true;
 }
 
-// Parse bitfield from 01 00/20/40... and return a mask of supported PIDs
-// returns the 4 bytes A..D where MSB of A = PID+1
+// Parse bitfield from 01 00/20/40... and return the 4 bytes A..D
 bool get_supported_block(uint8_t base_pid, uint8_t out_bits[4]) {
   // Expect reply: 41 <base> A B C D
-  while (KLine.available()) KLine.read();
+  while (KLine.available()) (void)KLine.read();
+
   k_send_req(0x01, base_pid);
   delay(REQ_GAP_MS);
 
   uint8_t buf[64];
   size_t n = k_read_frame(buf, sizeof(buf));
   if (n < 7) return false;
+
+  // optional checksum check
+  if (!verify_checksum(buf, n)) {
+    // not fatal — some stacks omit CS in certain modes, or we've cut at idle
+  }
 
   // Find [41 base]
   int idx = -1;
@@ -231,13 +273,20 @@ bool get_supported_block(uint8_t base_pid, uint8_t out_bits[4]) {
   return true;
 }
 
+// ===================================================================================
+// Arduino entry points
+// ===================================================================================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("\nESP32 Network Config...\n ESP32-ODB\n PASSWORD : 12345678");
+  delay(200);
+  Serial.println();
+  Serial.println("ESP32 Network Config...");
+  Serial.println("  SSID: ESP32-OBD");
+  Serial.println("  PASS: 12345678");
   net_begin_ap();
-  delay(1000);
-  Serial.println("\nESP32 OBD-II K-Line Mode 01 scanner (ISO 9141/14230 @ 10400 8N1)");
+  delay(500);
+  Serial.println("TCP server on port 3333 ready");
+  Serial.println("ESP32 OBD-II K-Line Mode 01 scanner (ISO 9141/14230 @ 10400 8N1)");
 
   KLine.begin(K_BAUD, SERIAL_8N1, K_RX_PIN, K_TX_PIN);
   delay(200);
@@ -250,17 +299,18 @@ void setup() {
 }
 
 void loop() {
+  net_poll_clients();
+
   // Discover supported PIDs across ranges 0x00, 0x20, 0x40, 0x60, 0x80
   const uint8_t bases[] = {0x00, 0x20, 0x40, 0x60, 0x80};
   for (uint8_t b : bases) {
-    net_poll_clients();
     uint8_t bits[4] = {0,0,0,0};
     if (!get_supported_block(b, bits)) {
-      Serial.printf("Base 0x%02X: no supported map (skip)\n", b);
+      logf("Base 0x%02X: no supported map (skip)\n", b);
       continue;
     }
-    Serial.printf("Supported map for 0x%02X-0x%02X: %02X %02X %02X %02X\n",
-                  (unsigned)b+1, (unsigned)b+0x20, bits[0], bits[1], bits[2], bits[3]);
+    logf("Supported map for 0x%02X-0x%02X: %02X %02X %02X %02X\n",
+         (unsigned)b+1, (unsigned)b+0x20, bits[0], bits[1], bits[2], bits[3]);
 
     // For each bit set, query that PID
     for (int i=0;i<32;i++) {
@@ -271,11 +321,14 @@ void loop() {
         uint8_t pid = b + 1 + i;
         // Skip the continuation PID (i=31) which signals next block availability
         if (pid == (uint8_t)(b + 0x20)) continue;
-        request_mode01_and_print(pid);
+
+        (void)request_mode01_and_print(pid);
         delay(REQ_GAP_MS);
+        net_poll_clients();
       }
     }
   }
 
-  Serial.println("Scan cycle complete. Sleeping 2s...\n");
+  logf("Scan cycle complete. Sleeping 2s...\n\n");
+  delay(2000);
 }
