@@ -1,73 +1,71 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <stdarg.h>  // for va_list
+#include <stdarg.h> // for va_list
+
+// ===================================================================================
+// Configuration
+// ===================================================================================
 
 // -------- Wi-Fi AP config --------
-static const char* AP_SSID = "ESP32-OBD";
-static const char* AP_PASS = "12345678";  // >= 8 chars
+static const char *AP_SSID = "ESP32-OBD";
+static const char *AP_PASS = "12345678"; // >= 8 chars
 static const IPAddress AP_IP(192, 168, 4, 1);
 static const IPAddress AP_GW(192, 168, 4, 1);
 static const IPAddress AP_MASK(255, 255, 255, 0);
 static const uint16_t TCP_PORT = 3333;
 
+// -------- K-Line & Hardware Pins --------
+static const int K_TX_PIN = 17;      // ESP32 TX -> Transceiver TXD
+static const int K_RX_PIN = 16;      // ESP32 RX <- Transceiver RXD
+static const int STATUS_LED_PIN = 2; // Onboard LED for status indication
+HardwareSerial KLine(1);             // Use UART1 on ESP32
+
+// -------- KWP2000 Timing --------
+static const uint32_t K_BAUD = 10400;         // ISO9141/14230 common rate
+static const uint32_t REQ_GAP_MS = 55;        // P2: Min time between requests
+static const uint32_t BYTE_TIMEOUT_MS = 100;  // P3: Timeout for single byte reception
+static const uint32_t FRAME_TIMEOUT_MS = 500; // Overall frame guard timeout
+static const uint32_t IDLE_GAP_MS = 55;       // P1: Inter-byte timeout to detect end-of-frame
+
+// ===================================================================================
+// Global State
+// ===================================================================================
+
 WiFiServer obdServer(TCP_PORT);
-WiFiClient clients[4];  // up to 4 telnet/CLI readers
-
-// -------- K-Line wiring (through a proper transceiver!) --------
-// ESP32 <-> K-Line transceiver (e.g., L9637/MC33290)
-static const int K_TX_PIN = 17;  // ESP32 TX -> Transceiver TXD
-static const int K_RX_PIN = 16;  // ESP32 RX <- Transceiver RXD
-
-// UART1 on ESP32
-HardwareSerial KLine(1);
-
-// -------- Timing --------
-static const uint32_t K_BAUD = 10400;          // ISO9141/14230 common rate
-static const uint32_t REQ_GAP_MS = 55;         // gap between requests
-static const uint32_t BYTE_TIMEOUT_MS = 40;    // per-byte timeout guard
-static const uint32_t FRAME_TIMEOUT_MS = 300;  // overall frame guard
-static const uint32_t IDLE_GAP_MS = 25;        // end-of-frame idle gap
+WiFiClient clients[4]; // up to 4 telnet/CLI readers
 
 // ----- Keep-alive & re-init policy -----
-static uint32_t last_activity_ms = 0;
 static uint32_t last_keepalive_ms = 0;
 static uint8_t no_reply_count = 0;
 
-// NEW: Array of possible KWP/ISO headers to try
-// ===================================================================================
+// ----- ECU Header Discovery -----
 const uint8_t KWP_HEADERS[][3] = {
-  { 0x80, 0x11, 0xF1 },  // KWP2000 Physical (Honda Standard)
-  { 0xC1, 0x33, 0xF1 },  // KWP2000 Physical with length
-  { 0x68, 0x6A, 0xF1 },  // ISO 9141-2
-  { 0x81, 0x11, 0xF1 }   // KWP2000 Physical variation
+    {0xC1, 0x72, 0xF1}, // KWP2000: Honda Custom Diagnostic DA=0x72
+    {0xC1, 0x33, 0xF1}, // KWP2000: Standard OBD-II ECU DA=0x33
+    {0xC1, 0x7E, 0xF1}, // KWP2000: Honda Custom Flash DA=0x7E
+    {0x80, 0x11, 0xF1}, // KWP2000: Alternative ECU DA=0x11
+    {0x68, 0x6A, 0xF1}  // ISO 9141-2: DA=0x6A
 };
 const int NUM_HEADERS = sizeof(KWP_HEADERS) / sizeof(KWP_HEADERS[0]);
-
-uint8_t active_header[3];        // The header currently being used for requests
-int current_header_index = 0;    // Index for the KWP_HEADERS array
-bool ecu_has_responded = false;  // Flag to lock the header once ECU responds
-// ===================================================================================
-
+uint8_t active_header[3];
+int current_header_index = 0;
+bool ecu_has_responded = false;
 
 // ===================================================================================
-// Networking helpers
+// Networking & Logging
 // ===================================================================================
-static void net_broadcast(const char* s) {
-  for (int i = 0; i < 4; ++i) {
-    if (clients[i] && clients[i].connected()) clients[i].print(s);
+
+static void net_broadcast(const char *s)
+{
+  for (int i = 0; i < 4; ++i)
+  {
+    if (clients[i] && clients[i].connected())
+      clients[i].print(s);
   }
 }
 
-static void net_broadcastf(const char* fmt, ...) {
-  char buf[256];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  net_broadcast(buf);
-}
-
-static void logf(const char* fmt, ...) {
+static void logf(const char *fmt, ...)
+{
   char buf[256];
   va_list ap;
   va_start(ap, fmt);
@@ -77,88 +75,98 @@ static void logf(const char* fmt, ...) {
   net_broadcast(buf);
 }
 
-void net_begin_ap() {
+void net_begin_ap()
+{
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_GW, AP_MASK);
-  // channel 6, not hidden, max 4 clients
   WiFi.softAP(AP_SSID, AP_PASS, 6, 0, 4);
   obdServer.begin();
   obdServer.setNoDelay(true);
 }
 
-void net_poll_clients() {
-  // accept a new client if there is one
-  if (obdServer.hasClient()) {
+void net_poll_clients()
+{
+  if (obdServer.hasClient())
+  {
     WiFiClient c = obdServer.available();
-    if (c) {
+    if (c)
+    {
       bool placed = false;
-      for (int i = 0; i < 4; ++i) {
-        if (!clients[i] || !clients[i].connected()) {
+      for (int i = 0; i < 4; ++i)
+      {
+        if (!clients[i] || !clients[i].connected())
+        {
           clients[i].stop();
           clients[i] = c;
           placed = true;
           break;
         }
       }
-      if (!placed) c.stop();  // refuse if full
+      if (!placed)
+        c.stop();
     }
   }
-  // cleanup dead connections
-  for (int i = 0; i < 4; ++i) {
-    if (clients[i] && !clients[i].connected()) clients[i].stop();
+  for (int i = 0; i < 4; ++i)
+  {
+    if (clients[i] && !clients[i].connected())
+      clients[i].stop();
   }
 }
 
 // ===================================================================================
-/* Utils */
+// K-Line Core Communication
 // ===================================================================================
-static uint8_t checksum8(const uint8_t* buf, size_t n_without_cs) {
+
+static uint8_t checksum8(const uint8_t *buf, size_t n_without_cs)
+{
   uint16_t sum = 0;
-  for (size_t i = 0; i < n_without_cs; ++i) sum += buf[i];
+  for (size_t i = 0; i < n_without_cs; ++i)
+    sum += buf[i];
   return (uint8_t)(sum & 0xFF);
 }
 
-static bool verify_checksum(const uint8_t* buf, size_t n_with_cs) {
-  if (n_with_cs < 2) return false;
+static bool verify_checksum(const uint8_t *buf, size_t n_with_cs)
+{
+  if (n_with_cs < 2)
+    return false;
   uint8_t cs = buf[n_with_cs - 1];
   return checksum8(buf, n_with_cs - 1) == cs;
 }
 
-// Read one byte with timeout
-bool k_read_byte(uint8_t& b, uint32_t t_byte_ms = BYTE_TIMEOUT_MS) {
-  uint32_t t0 = millis();
-  while ((millis() - t0) < t_byte_ms) {
-    if (KLine.available()) {
-      b = (uint8_t)KLine.read();
-      return true;
-    }
+void clear_rx_buffer()
+{
+  while (KLine.available())
+  {
+    (void)KLine.read();
   }
-  return false;
 }
 
-// Read a frame using inter-byte idle gap and overall guard timeout.
-// Returns the captured length (0 if nothing).
-size_t k_read_frame(uint8_t* out, size_t max_len) {
+size_t k_read_frame(uint8_t *out, size_t max_len)
+{
   size_t n = 0;
   uint32_t t_start = millis();
   uint32_t last_rx = millis();
   bool got_any = false;
 
-  while ((millis() - t_start) < FRAME_TIMEOUT_MS) {
-    while (KLine.available()) {
-      if (n < max_len) out[n++] = (uint8_t)KLine.read();
+  while ((millis() - t_start) < FRAME_TIMEOUT_MS)
+  {
+    while (KLine.available())
+    {
+      if (n < max_len)
+        out[n++] = (uint8_t)KLine.read();
       last_rx = millis();
       got_any = true;
     }
-    // end of frame when we had data and idle gap exceeds threshold
-    if (got_any && (millis() - last_rx) > IDLE_GAP_MS) break;
+    if (got_any && (millis() - last_rx) > IDLE_GAP_MS)
+      break;
   }
   return n;
 }
 
-// MODIFIED: k_send_req now uses the global 'active_header'
-void k_send_req(uint8_t svc, uint8_t pid) {
+void k_send_req(uint8_t svc, uint8_t pid)
+{
+  clear_rx_buffer();
   uint8_t f[6];
   f[0] = active_header[0];
   f[1] = active_header[1];
@@ -170,293 +178,264 @@ void k_send_req(uint8_t svc, uint8_t pid) {
   KLine.flush();
 }
 
-// Very simple fast-init pulse (optional). Some ECUs need this before talking.
-// NOTE: Depending on the transceiver, logic may be inverted/non-inverted.
-// If it doesn't wake ECU, comment this out and use proper 5-baud init instead.
-void kline_fast_init_pulse() {
-  KLine.end();                   // Release UART so we can bit-bang TX pin
-  digitalWrite(K_TX_PIN, HIGH);  // Idle State (High)
-  delay(100);                    // ให้เวลาสำหรับ Idle State
+void kline_fast_init_pulse()
+{
+  KLine.end();                  // Release UART to bit-bang the TX pin
+  digitalWrite(K_TX_PIN, HIGH); // Ensure bus is idle (High)
+  delay(100);
 
-  // KWP2000 Fast Init: Low Pulse 50 ms
-  digitalWrite(K_TX_PIN, LOW);   // เริ่ม Low
-  delay(50);                     // Low 50 ms (Wake-up)
-  digitalWrite(K_TX_PIN, HIGH);  // ปล่อย High เพื่อเตรียมส่ง UART
+  // KWP2000 Fast Init: 50ms LOW pulse to wake up the ECU
+  digitalWrite(K_TX_PIN, LOW);
+  delay(50);
+  digitalWrite(K_TX_PIN, HIGH);
 
-  // Re-attach UART ที่ 10400 8N1 เพื่อส่ง Start Communication Message
+  // Re-attach UART immediately to send the first command
   KLine.begin(K_BAUD, SERIAL_8N1, K_RX_PIN, K_TX_PIN);
+  clear_rx_buffer();
 }
 
-// Parse/print common Mode 1 PIDs
-void print_pid_decoded(uint8_t pid, const uint8_t* data, size_t n) {
-  auto u16 = [&](int i) {
-    return (uint16_t)data[i] << 8 | data[i + 1];
-  };
+// ===================================================================================
+// Session & Response Management
+// ===================================================================================
 
-  switch (pid) {
-    case 0x04:
-      if (n >= 1) logf("Load: %.1f %%\n", data[0] * 100.0 / 255.0);
-      break;
-    case 0x05:
-      if (n >= 1) logf("Coolant Temp: %d C\n", (int)data[0] - 40);
-      break;
-    case 0x0C:
-      if (n >= 2) logf("RPM: %.0f rpm\n", u16(0) / 4.0);
-      break;
-    case 0x0D:
-      if (n >= 1) logf("Speed: %d km/h\n", data[0]);
-      break;
-    case 0x0F:
-      if (n >= 1) logf("Intake Air Temp: %d C\n", (int)data[0] - 40);
-      break;
-    case 0x10:
-      if (n >= 2) logf("MAF: %.2f g/s\n", u16(0) / 100.0);
-      break;
-    case 0x11:
-      if (n >= 1) logf("Throttle: %.1f %%\n", data[0] * 100.0 / 255.0);
-      break;
-    case 0x2F:
-      if (n >= 1) logf("Fuel Level: %.1f %%\n", data[0] * 100.0 / 255.0);
-      break;
-    case 0x33:
-      if (n >= 1) logf("Baro Pressure: %d kPa\n", data[0]);
-      break;
-    case 0x46:
-      if (n >= 1) logf("Ambient Temp: %d C\n", (int)data[0] - 40);
-      break;
-    case 0x5E:
-      if (n >= 2) logf("Engine Fuel Rate: %.2f L/h\n", u16(0) / 20.0);
-      break;
-    default:
-      {
-        logf("PID 0x%02X (raw):", pid);
-        for (size_t i = 0; i < n; i++) logf(" %02X", data[i]);
-        logf("\n");
-      }
-      break;
-  }
-}
-
-// request_mode01_and_print and get_supported_block now use mark_rx_ok/fail
-bool request_mode01_and_print(uint8_t pid) {
-  while (KLine.available()) (void)KLine.read();
-  k_send_req(0x01, pid);
-  delay(REQ_GAP_MS);
-  uint8_t buf[64];
-  size_t n = k_read_frame(buf, sizeof(buf));
-  if (n < 6) {
-    logf("PID 0x%02X: no/short reply (n=%u)\n", pid, (unsigned)n);
-    mark_rx_fail();
-    return false;
-  }
-  if (n >= 6 && !verify_checksum(buf, n)) {
-    logf("PID 0x%02X: checksum mismatch, n=%u\n", pid, (unsigned)n);
-  }
-  int idx = -1;
-  for (size_t i = 0; i + 2 < n; i++) {
-    if (buf[i] == 0x41 && buf[i + 1] == pid) {
-      idx = (int)i;
-      break;
-    }
-  }
-  if (idx < 0) {
-    for (size_t i = 0; i + 4 < n; i++) {
-      if (buf[i + 3] == 0x41 && buf[i + 4] == pid) {
-        idx = (int)i + 3;
-        break;
-      }
-    }
-  }
-  if (idx < 0) {
-    logf("PID 0x%02X: unrecognized reply:", pid);
-    for (size_t i = 0; i < n; i++) logf(" %02X", buf[i]);
-    logf("\n");
-    return false;
-  }
-
-  mark_rx_ok();  // We got a parsable reply
-  int data_start = idx + 2;
-  int data_end = (int)n - 1;
-  if (data_end < data_start) data_end = data_start;
-  int data_len = (data_end - data_start);
-  if (data_len < 0) data_len = 0;
-  print_pid_decoded(pid, &buf[data_start], (size_t)data_len);
-  return true;
-}
-
-bool get_supported_block(uint8_t base_pid, uint8_t out_bits[4]) {
-  while (KLine.available()) (void)KLine.read();
-  k_send_req(0x01, base_pid);
-  delay(REQ_GAP_MS);
-  uint8_t buf[64];
-  size_t n = k_read_frame(buf, sizeof(buf));
-  logf("K_Line Return block Size : (n=%u)\n" , (unsigned)n);
-
-  if (n < 7) {
-    mark_rx_fail();
-    return false;
-  }
-
-  if (!verify_checksum(buf, n)) { /* not fatal */
-  }
-
-  int idx = -1;
-  for (size_t i = 0; i + 1 < n; i++) {
-    if (buf[i] == 0x41 && buf[i + 1] == base_pid) {
-      idx = (int)i;
-      break;
-    }
-  }
-
-  if (idx < 0) {
-    for (size_t i = 0; i + 4 < n; i++) {
-      if (buf[i + 3] == 0x41 && buf[i + 4] == base_pid) {
-        idx = (int)i + 3;
-        break;
-      }
-    }
-  }
-
-  if (idx < 0) {
-    mark_rx_fail();
-    return false;
-  }
-  int s = idx + 2;
-  if (s + 3 >= (int)n) {
-    mark_rx_fail();
-    return false;
-  }
-
-  mark_rx_ok();  // We got a valid block response
-  for (int i = 0; i < 4; i++) out_bits[i] = buf[s + i];
-  return true;
-}
-
-void session_maintain() {
-  uint32_t now = millis();
-
-  // ส่ง keep-alive ทุก ~1500 ms
-  if (now - last_keepalive_ms > 1500) {
-    send_tester_present();
-    last_keepalive_ms = now;
-  }
-
-  // ถ้าไม่มีตอบกลับติดกันหลายครั้ง → re-init
-  if (no_reply_count >= 2) {
-    // drain
-    while (KLine.available()) (void)KLine.read();
-    // re-init pulse + UART begin อีกครั้ง (ลอง 8E1 ด้วยถ้ายังเงียบ)
-    kline_fast_init_pulse();
-    no_reply_count = 0;
-  }
-}
-
-// เรียกหลังจาก “ขอแล้วได้คำตอบ”
-inline void mark_rx_ok() {
-  last_activity_ms = millis();
+inline void mark_rx_ok()
+{
   no_reply_count = 0;
-  if (!ecu_has_responded) {
-    ecu_has_responded = true;  // Lock the header on first success!
+  if (!ecu_has_responded)
+  {
+    ecu_has_responded = true; // Lock the header on first success!
     logf("\n*** SUCCESS: ECU Responded with Header {0x%02X, 0x%02X, 0x%02X}. Locking this header. ***\n\n",
          active_header[0], active_header[1], active_header[2]);
   }
 }
 
-// เรียกเมื่อ “ขอแล้วไม่ตอบ/สั้นผิดปกติ”
-inline void mark_rx_fail() {
+inline void mark_rx_fail()
+{
   no_reply_count++;
 }
 
-void send_tester_present() {
-  // service 0x3E, subfunction 0x00
-  k_send_req(0x3E, 0x00);
+bool send_tester_present()
+{
+  k_send_req(0x3E, 0x00); // Service 0x3E: Tester Present
   delay(REQ_GAP_MS);
   uint8_t buf[32];
   size_t n = k_read_frame(buf, sizeof(buf));
-  // (ไม่ต้องซีเรียสกับการ parse มาก แค่ให้ ECUเห็นว่าเรายังอยู่)
+
+  if (n > 0)
+  { // Any valid response is good enough
+    mark_rx_ok();
+    return true;
+  }
+  else
+  {
+    mark_rx_fail();
+    return false;
+  }
+}
+
+void session_maintain()
+{
+  uint32_t now = millis();
+  if (now - last_keepalive_ms > 2000)
+  {
+    send_tester_present();
+    last_keepalive_ms = now;
+  }
+
+  if (no_reply_count >= 3)
+  {
+    logf("!!! Connection lost. Re-initializing... !!!\n");
+    ecu_has_responded = false; // Go back to discovery mode
+    no_reply_count = 0;
+    kline_fast_init_pulse();
+  }
 }
 
 // ===================================================================================
-// Arduino entry points
+// OBD-II PID Processing
 // ===================================================================================
-void setup() {
+
+void print_pid_decoded(uint8_t pid, const uint8_t *data, size_t n)
+{
+  auto u16 = [&](int i)
+  { return (uint16_t)data[i] << 8 | data[i + 1]; };
+  switch (pid)
+  {
+  case 0x04:
+    if (n >= 1)
+      logf("Load: %.1f %%\n", data[0] * 100.0 / 255.0);
+    break;
+  case 0x05:
+    if (n >= 1)
+      logf("Coolant Temp: %d C\n", (int)data[0] - 40);
+    break;
+  case 0x0C:
+    if (n >= 2)
+      logf("RPM: %.0f rpm\n", u16(0) / 4.0);
+    break;
+  case 0x0D:
+    if (n >= 1)
+      logf("Speed: %d km/h\n", data[0]);
+    break;
+  case 0x0F:
+    if (n >= 1)
+      logf("Intake Air Temp: %d C\n", (int)data[0] - 40);
+    break;
+  case 0x11:
+    if (n >= 1)
+      logf("Throttle: %.1f %%\n", data[0] * 100.0 / 255.0);
+    break;
+  default:
+    logf("PID 0x%02X (raw):", pid);
+    for (size_t i = 0; i < n; i++)
+      logf(" %02X", data[i]);
+    logf("\n");
+    break;
+  }
+}
+
+bool get_supported_block(uint8_t base_pid, uint8_t out_bits[4])
+{
+  k_send_req(0x01, base_pid);
+  delay(REQ_GAP_MS);
+  uint8_t buf[64];
+  size_t n = k_read_frame(buf, sizeof(buf));
+
+  if (n < 7)
+  {
+    logf("PID 0x%02X: No/short reply (n=%u)\n", base_pid, (unsigned)n);
+    mark_rx_fail();
+    return false;
+  }
+
+  // Check for Negative Response (0x7F)
+  if (buf[3] == 0x7F && buf[4] == 0x01)
+  {
+    logf("PID 0x%02X: Negative Response Code (NRC) 0x%02X\n", base_pid, buf[5]);
+    mark_rx_fail();
+    return false;
+  }
+
+  if (!verify_checksum(buf, n))
+  {
+    logf("PID 0x%02X: Checksum mismatch!\n", base_pid);
+    // Not fatal, but worth noting
+  }
+
+  int idx = -1;
+  for (size_t i = 0; i + 1 < n; i++)
+  {
+    if (buf[i] == 0x41 && buf[i + 1] == base_pid)
+    {
+      idx = (int)i;
+      break;
+    }
+  }
+
+  if (idx < 0)
+  { // Fallback search if header format is different
+    for (size_t i = 0; i + 4 < n; i++)
+    {
+      if (buf[i + 3] == 0x41 && buf[i + 4] == base_pid)
+      {
+        idx = (int)i + 3;
+        break;
+      }
+    }
+  }
+
+  if (idx < 0 || (idx + 2 + 4 > n))
+  {
+    logf("PID 0x%02X: Unrecognized reply format.\n", base_pid);
+    mark_rx_fail();
+    return false;
+  }
+
+  mark_rx_ok();
+  memcpy(out_bits, &buf[idx + 2], 4);
+  return true;
+}
+
+// ===================================================================================
+// Main Program Flow (setup & loop)
+// ===================================================================================
+
+void setup()
+{
   Serial.begin(115200);
-  pinMode(2, OUTPUT);
+  pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(K_TX_PIN, OUTPUT);
 
   delay(200);
-  Serial.println();
-  Serial.println("ESP32 Network Config...");
-  Serial.println("  SSID: ESP32-OBD");
-  Serial.println("  PASS: 12345678");
+  logf("\nESP32 OBD-II K-Line Scanner\n");
+  logf("Starting Wi-Fi AP: %s\n", AP_SSID);
   net_begin_ap();
-  delay(500);
-  Serial.println("TCP server on port 3333 ready");
-  Serial.println("ESP32 OBD-II K-Line Mode 01 scanner (ISO 9141/14230 @ 10400 8N1)");
+  logf("TCP server on port %d ready.\n", TCP_PORT);
 
-  KLine.begin(K_BAUD, SERIAL_8N1, K_RX_PIN, K_TX_PIN);
-  delay(200);
-
-  // NEW: Initialize the first header
+  // Initial K-Line setup
   memcpy(active_header, KWP_HEADERS[current_header_index], 3);
-
-  // OPTIONAL: try a fast-init pulse if your ECU needs waking.
-  // If this makes comms worse, comment it out.
   kline_fast_init_pulse();
-  Serial.println("Starting scan of supported PIDs...");
+  logf("Starting ECU discovery...\n");
 }
 
-// MODIFIED: loop() now has a discovery phase and a scanning phase
-void loop() {
+void loop()
+{
   net_poll_clients();
 
-  if (!ecu_has_responded) {
+  if (!ecu_has_responded)
+  {
     // --- DISCOVERY PHASE ---
-    // Try to connect by requesting PID 0x00 with the current header
-    digitalWrite(2, HIGH);
+    digitalWrite(STATUS_LED_PIN, HIGH); // LED on during search
     logf("Searching... Trying Header #%d: {0x%02X, 0x%02X, 0x%02X}\n",
          current_header_index, active_header[0], active_header[1], active_header[2]);
 
     uint8_t dummy_bits[4];
-    get_supported_block(0x00, dummy_bits);  // This function will call mark_rx_ok() on success
+    get_supported_block(0x00, dummy_bits); // Request PID 0x00 to check for a response
 
-    // If it's still not connected after the attempt, move to the next header
-    if (!ecu_has_responded) {
-      digitalWrite(2, LOW);
+    if (!ecu_has_responded)
+    {
       current_header_index = (current_header_index + 1) % NUM_HEADERS;
       memcpy(active_header, KWP_HEADERS[current_header_index], 3);
       logf("No response. Moving to next header.\n");
-      delay(500);  // Wait a bit before trying the next one
+      delay(500); // Wait before trying the next header
     }
-
-  } else {
+    digitalWrite(STATUS_LED_PIN, LOW); // LED off after attempt
+  }
+  else
+  {
     // --- SCANNING PHASE ---
-    // ECU has responded, so now we use the locked header to scan for PIDs.
-    session_maintain();  // Maintain the session only after connection is established
+    session_maintain();
 
-    const uint8_t bases[] = { 0x00, 0x20, 0x40, 0x60, 0x80 };
-    for (uint8_t b : bases) {
-      uint8_t bits[4] = { 0, 0, 0, 0 };
-      if (!get_supported_block(b, bits)) {
-        logf("Base 0x%02X: no supported map (skip)\n", b);
+    const uint8_t bases[] = {0x00, 0x20, 0x40}; // Scan first 3 blocks
+    digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN)); // Blinking LED when connected
+    
+    for (uint8_t b : bases)
+    {
+      uint8_t bits[4] = {0};
+      if (!get_supported_block(b, bits))
+      {
+        logf("Base 0x%02X: No supported map (skip)\n", b);
         continue;
       }
       logf("Supported map for 0x%02X-0x%02X: %02X %02X %02X %02X\n",
            (unsigned)b + 1, (unsigned)b + 0x20, bits[0], bits[1], bits[2], bits[3]);
 
-      for (int i = 0; i < 32; i++) {
-        int byte_idx = i / 8;
-        int bit_in_byte = 7 - (i % 8);
-        if (bits[byte_idx] & (1 << bit_in_byte)) {
+      for (int i = 0; i < 32; i++)
+      {
+        if ((bits[i / 8] >> (7 - (i % 8))) & 1)
+        {
           uint8_t pid = b + 1 + i;
-          if (pid == (uint8_t)(b + 0x20)) continue;
-          request_mode01_and_print(pid);
+          if (pid == b || pid == (uint8_t)(b + 0x20))
+            continue; // Don't request the map PID itself
+          // For now, let's just log that we would request it
+          logf("-> Found supported PID: 0x%02X\n", pid);
+          // request_mode01_and_print(pid); // Uncomment to fetch and print data
           delay(REQ_GAP_MS);
           net_poll_clients();
         }
       }
     }
-    logf("Scan cycle complete. Sleeping 2s...\n\n");
-    delay(2000);
+    logf("Scan cycle complete. \n\n");
+    net_poll_clients();
   }
 }
