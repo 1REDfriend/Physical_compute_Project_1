@@ -23,10 +23,9 @@ HardwareSerial KLine(1);              // Use UART1 on ESP32
 // -------- KWP2000 Timing --------
 static const uint32_t K_BAUD = 10400;          // ISO9141/14230 common rate
 static const uint32_t REQ_GAP_MS = 55;         // P2: Min time between requests
-static const uint32_t BYTE_TIMEOUT_MS = 100;   // P3: Timeout for single byte reception
-static const uint32_t FRAME_TIMEOUT_MS = 500;  // Overall frame guard timeout
+static const uint32_t BYTE_TIMEOUT_MS = 200;   // P3: Timeout for single byte reception
+static const uint32_t FRAME_TIMEOUT_MS = 400;  // Overall frame guard timeout
 static const uint32_t IDLE_GAP_MS = 55;        // P1: Inter-byte timeout to detect end-of-frame
-
 
 // ===================================================================================
 // Multi-Core & Shared Data Management
@@ -34,7 +33,6 @@ static const uint32_t IDLE_GAP_MS = 55;        // P1: Inter-byte timeout to dete
 TaskHandle_t kline_task_handle;  // Task Handle for the K-Line Task
 SemaphoreHandle_t log_mutex;     // Mutex to protect the shared log buffer
 char shared_log_buffer[256];     // Shared buffer for messages between cores
-
 
 // ===================================================================================
 // Global State
@@ -49,11 +47,37 @@ static uint8_t no_reply_count = 0;
 
 // ----- ECU Header Discovery -----
 const uint8_t KWP_HEADERS[][3] = {
-  { 0xC1, 0x72, 0xF1 },  // KWP2000: Honda Custom Diagnostic DA=0x72
-  { 0xC1, 0x33, 0xF1 },  // KWP2000: Standard OBD-II ECU DA=0x33
-  { 0xC1, 0x7E, 0xF1 },  // KWP2000: Honda Custom Flash DA=0x7E
-  { 0x80, 0x11, 0xF1 },  // KWP2000: Alternative ECU DA=0x11
-  { 0x68, 0x6A, 0xF1 }   // ISO 9141-2: DA=0x6A
+    // --- Honda Specific ---
+    { 0xC1, 0x72, 0xF1 },  // Honda: Custom Diagnostics (PGM-FI)
+    { 0xC1, 0x7E, 0xF1 },  // Honda: Custom Flash/Reprogram
+
+    // --- Standard OBD-II / Generic ---
+    { 0xC1, 0x33, 0xF1 },  // Standard: OBD-II Generic ECU (most common)
+    { 0x81, 0x33, 0xF1 },  // Standard: OBD-II Generic ECU (with length byte)
+    { 0xC1, 0x10, 0xF1 },  // Standard: Generic Engine ECU #1
+    { 0xC1, 0x11, 0xF1 },  // Standard: Generic Engine ECU #2 (DA=0x11)
+    { 0xC1, 0x18, 0xF1 },  // Standard: Generic Gearbox/Transmission ECU
+
+    // --- Volkswagen Group (VW, Audi, Skoda, Seat) ---
+    { 0x68, 0x6A, 0xF1 },  // VW ISO 9141-2: KW1281 Protocol (older models)
+    { 0x80, 0x01, 0xF1 },  // VW KWP2000: Engine
+    { 0x80, 0x02, 0xF1 },  // VW KWP2000: Auto Transmission
+    { 0x80, 0x17, 0xF1 },  // VW KWP2000: Instrument Cluster
+    { 0x80, 0x25, 0xF1 },  // VW KWP2000: Immobilizer
+    { 0x80, 0x56, 0xF1 },  // VW KWP2000: Radio
+
+    // --- Suzuki / Kawasaki (Motorcycles) ---
+    { 0x80, 0x12, 0xF1 },  // Suzuki: Engine ECU (SDL Mode 1)
+    { 0x81, 0x12, 0xF1 },  // Suzuki: Engine ECU (SDL Mode 2, with length)
+    { 0x80, 0x11, 0xF1 },  // Kawasaki: Engine ECU
+
+    // --- Fiat / Alfa Romeo ---
+    { 0xC1, 0x11, 0xF1 },  // Fiat/Alfa: Engine Management (Marelli/Bosch)
+    { 0xC1, 0x42, 0xF1 },  // Fiat/Alfa: ABS System
+
+    // --- Other Common Headers ---
+    { 0x68, 0x11, 0xF1 },  // ISO 9141-2: Common Engine ECU
+    { 0xC2, 0x33, 0xF1 }   // Standard: Physical addressing with 2-byte header
 };
 const int NUM_HEADERS = sizeof(KWP_HEADERS) / sizeof(KWP_HEADERS[0]);
 uint8_t active_header[3];
@@ -81,13 +105,21 @@ static void logf(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
 
-  Serial.print(buf);  // Serial is thread-safe enough for this purpose
+  // ตรวจสอบว่ามีที่ว่างใน Buffer พอที่จะเขียนหรือไม่
+  if (Serial.availableForWrite() > strlen(buf)) {
+    Serial.print(buf);
+  } else {
+    // ถ้า Buffer ใกล้เต็ม อาจจะแค่ print จุดเพื่อบอกว่ามี Log ที่ถูกข้ามไป
+    Serial.print(".");
+  }
 
   // Safely write to the shared buffer using the mutex
   if (log_mutex != NULL && xSemaphoreTake(log_mutex, portMAX_DELAY) == pdTRUE) {
     strncpy(shared_log_buffer, buf, sizeof(shared_log_buffer) - 1);
     xSemaphoreGive(log_mutex);
   }
+
+  vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 void net_begin_ap() {
@@ -128,11 +160,24 @@ void net_poll_clients() {
 // K-Line Core Communication & OBD-II (These functions don't change)
 // ===================================================================================
 
+void kline_fast_init_pulse() {
+  KLine.end();
+  logf("Fast init...\n");
+  digitalWrite(K_TX_PIN, HIGH);
+  delay(300);
+  digitalWrite(K_TX_PIN, LOW);
+  delay(70);
+  digitalWrite(K_TX_PIN, HIGH);
+  delay(120);
+  KLine.begin(K_BAUD, SERIAL_8N1, K_RX_PIN, K_TX_PIN);
+  clear_rx_buffer();
+}
+
 static uint8_t checksum8(const uint8_t *buf, size_t n_without_cs) {
   uint16_t sum = 0;
   for (size_t i = 0; i < n_without_cs; ++i)
     sum += buf[i];
-  return (uint8_t)(sum & 0xFF);
+  return (uint8_t)(0x100 - (sum & 0xFF));
 }
 
 static bool verify_checksum(const uint8_t *buf, size_t n_with_cs) {
@@ -176,18 +221,6 @@ void k_send_req(uint8_t svc, uint8_t pid) {
   KLine.flush();
 }
 
-void kline_fast_init_pulse() {
-  KLine.end();
-  digitalWrite(K_TX_PIN, LOW);
-  delay(200);
-  digitalWrite(K_TX_PIN, HIGH);
-  delay(50);
-  digitalWrite(K_TX_PIN, LOW);
-  digitalWrite(K_TX_PIN, HIGH);
-  KLine.begin(K_BAUD, SERIAL_8N1, K_RX_PIN, K_TX_PIN);
-  clear_rx_buffer();
-}
-
 inline void mark_rx_ok() {
   no_reply_count = 0;
   if (!ecu_has_responded) {
@@ -203,11 +236,12 @@ inline void mark_rx_fail() {
 
 bool send_tester_present() {
   k_send_req(0x3E, 0x00);
-  delay(REQ_GAP_MS);
+  vTaskDelay(pdMS_TO_TICKS(REQ_GAP_MS));
   uint8_t buf[32];
   size_t n = k_read_frame(buf, sizeof(buf));
-  if (n > 0) {
+  if (n > 1) {
     mark_rx_ok();
+    logf("(n=%zu)\n\n", n);
     return true;
   } else {
     mark_rx_fail();
@@ -221,7 +255,8 @@ void session_maintain() {
     send_tester_present();
     last_keepalive_ms = now;
   }
-  if (no_reply_count >= 3) {
+
+  if (no_reply_count >= (NUM_HEADERS * 2)) {
     logf("!!! Connection lost. Re-initializing... !!!\n");
     ecu_has_responded = false;
     no_reply_count = 0;
@@ -231,7 +266,19 @@ void session_maintain() {
 
 bool get_supported_block(uint8_t base_pid, uint8_t out_bits[4]) {
   k_send_req(0x01, base_pid);
-  delay(REQ_GAP_MS);
+  vTaskDelay(pdMS_TO_TICKS(REQ_GAP_MS));
+
+  if (ESP.getFreeHeap() < sizeof(uint8_t) + sizeof(size_t)) {
+    logf("Not enough heap memory to proceed!");
+    return false;
+  }
+
+  UBaseType_t klineStackRemaining = uxTaskGetStackHighWaterMark(kline_task_handle);
+  if (klineStackRemaining < 300) {
+    logf("Not enough stack memory to proceed!");
+    return false;
+  }
+
   uint8_t buf[64];
   size_t n = k_read_frame(buf, sizeof(buf));
 
@@ -287,6 +334,9 @@ void kline_task_code(void *pvParameters) {
 
   // This is the infinite loop for the K-Line task
   for (;;) {
+  
+    session_maintain();
+
     if (!ecu_has_responded) {
       // --- DISCOVERY PHASE ---
       digitalWrite(STATUS_LED_PIN, HIGH);
@@ -300,13 +350,11 @@ void kline_task_code(void *pvParameters) {
         current_header_index = (current_header_index + 1) % NUM_HEADERS;
         memcpy(active_header, KWP_HEADERS[current_header_index], 3);
         logf("No response. Moving to next header.\n");
-        delay(500);  // This delay is safe, it only pauses Core 1.
       }
       digitalWrite(STATUS_LED_PIN, LOW);
+      // vTaskDelay(pdMS_TO_TICKS(400));
     } else {
       // --- SCANNING PHASE ---
-      session_maintain();
-
       const uint8_t bases[] = { 0x00, 0x20, 0x40 };
       digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
 
@@ -324,12 +372,12 @@ void kline_task_code(void *pvParameters) {
             uint8_t pid = b + 1 + i;
             if (pid == b || pid == (uint8_t)(b + 0x20)) continue;
             logf("-> Found supported PID: 0x%02X\n", pid);
-            delay(REQ_GAP_MS);
+            vTaskDelay(pdMS_TO_TICKS(REQ_GAP_MS));
           }
         }
       }
-      logf("Scan cycle complete. Sleeping...\n\n");
-      delay(5000);  // This long delay is also safe now.
+      // logf("Scan cycle complete. Sleeping...\n\n");
+      // vTaskDelay(pdMS_TO_TICKS(400));
     }
   }
 }
@@ -342,6 +390,7 @@ void setup() {
   Serial.begin(115200);
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(K_TX_PIN, OUTPUT);
+  digitalWrite(K_TX_PIN, HIGH);
   delay(200);
 
   // Create the mutex before starting any tasks that might use it
@@ -358,7 +407,7 @@ void setup() {
   xTaskCreatePinnedToCore(
     kline_task_code,     // Task function
     "K-Line Task",       // Name for debugging
-    4096,                // Stack size
+    8192,                // Stack size
     NULL,                // Parameters
     1,                   // Priority
     &kline_task_handle,  // Task handle
@@ -382,7 +431,7 @@ void loop() {
   local_buffer[0] = '\0';  // เคลียร์ buffer ท้องถิ่น
 
   // 2. Safely check the shared buffer and broadcast any new messages
-  if (log_mutex != NULL && xSemaphoreTake(log_mutex, (TickType_t)10) == pdTRUE) {
+  if (log_mutex != NULL && xSemaphoreTake(log_mutex, (TickType_t)20) == pdTRUE) {
     if (shared_log_buffer[0] != '\0') {
       strncpy(local_buffer, shared_log_buffer, sizeof(local_buffer) - 1);
       shared_log_buffer[0] = '\0';
@@ -393,6 +442,7 @@ void loop() {
   if (local_buffer[0] != '\0') {
     net_broadcast(local_buffer);
   }
+  // ------------------------------------------------------------------------
 
   // 3. Small delay to prevent this loop from running at 100% CPU
   vTaskDelay(pdMS_TO_TICKS(10));
