@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <stdarg.h>  // for va_list
 #include <esp_task_wdt.h>
+#include "freertos/queue.h"
 
 // ===================================================================================
 // Configuration
@@ -24,9 +25,12 @@ HardwareSerial KLine(1);
 
 // -------- KWP2000 Timing --------
 static const uint32_t K_BAUD = 10400;
+static const uint32_t BUS_IDLE_MS = 100;
 static const uint32_t REQ_GAP_MS = 25;   // pacing between requests (derived from your logs)
 static const uint32_t FRAME_TIMEOUT_MS = 50;
-static const uint32_t IDLE_GAP_MS  = 30;
+static const uint32_t IDLE_GAP_MS  = 25;
+static const uint32_t FAST_INIT_MS  = 25;
+static const uint32_t FAST_INIT_END_MS  = 0;
 
 // Buffers / limits
 static const size_t MAX_FRAME   = 64;
@@ -35,9 +39,10 @@ static const size_t LOGBUF_SIZE = 256;
 // ===================================================================================
 // Multi-Core & Shared Data Management
 // ===================================================================================
-TaskHandle_t     kline_task_handle = nullptr;
-SemaphoreHandle_t log_mutex = nullptr;
-char             shared_log_buffer[LOGBUF_SIZE];
+TaskHandle_t      kline_task_handle = nullptr;
+QueueHandle_t     log_queue = nullptr;
+// SemaphoreHandle_t log_mutex = nullptr;
+// char             shared_log_buffer[LOGBUF_SIZE];
 
 // ===================================================================================
 // Global State
@@ -75,12 +80,14 @@ static void logf(const char *fmt, ...) {
   if (Serial.availableForWrite() > strlen(buf)) Serial.print(buf);
   else Serial.print(".");
 
-  if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-    strncpy(shared_log_buffer, buf, sizeof(shared_log_buffer) - 1);
-    shared_log_buffer[sizeof(shared_log_buffer) - 1] = '\0';
-    xSemaphoreGive(log_mutex);
+  // if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+  //   strncpy(shared_log_buffer, buf, sizeof(shared_log_buffer) - 1);
+  //   shared_log_buffer[sizeof(shared_log_buffer) - 1] = '\0';
+  //   xSemaphoreGive(log_mutex);
+  // }
+  if (log_queue) {
+    xQueueSend(log_queue, buf, pdMS_TO_TICKS(5));
   }
-  vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 void net_begin_ap() {
@@ -130,8 +137,13 @@ static void hex_dump_line(const char *prefix, const uint8_t *data, size_t len) {
   pos += snprintf(line + pos, sizeof(line) - pos, "%s", prefix);
   for (size_t i = 0; i < len && (pos + 4) < sizeof(line); ++i)
     pos += snprintf(line + pos, sizeof(line) - pos, "%02X ", data[i]);
-  if (pos + 2 < sizeof(line)) { line[pos++] = '\n'; line[pos] = '\0'; }
-  else { line[sizeof(line)-2] = '\n'; line[sizeof(line)-1] = '\0'; }
+  if (pos + 2 < sizeof(line)) {
+    line[pos++] = '\n';
+    line[pos] = '\0';
+  } else {
+    line[sizeof(line) - 2] = '\n';
+    line[sizeof(line) - 1] = '\0';
+  }
   logf("%s", line);
 }
 
@@ -158,16 +170,24 @@ static bool verify_honda_response(const uint8_t *resp, size_t n) {
   return true;
 }
 
+// ===================================================================================
+// K-Line Fast Init
+// ===================================================================================
+
 static void kline_fast_init_pulse() {
   KLine.end();
-  logf("Fast init (Honda Timing)...\n");
+
   pinMode(K_TX_PIN, OUTPUT);
-  digitalWrite(K_TX_PIN, HIGH); vTaskDelay(pdMS_TO_TICKS(300));
-  digitalWrite(K_TX_PIN, LOW);  vTaskDelay(pdMS_TO_TICKS(70));
-  digitalWrite(K_TX_PIN, HIGH); vTaskDelay(pdMS_TO_TICKS(70));
+  vTaskDelay(pdMS_TO_TICKS(BUS_IDLE_MS));
+  digitalWrite(K_TX_PIN, LOW);
+  vTaskDelay(pdMS_TO_TICKS(FAST_INIT_MS));
+  digitalWrite(K_TX_PIN, HIGH);
+  vTaskDelay(pdMS_TO_TICKS(FAST_INIT_MS));
+
   KLine.begin(K_BAUD, SERIAL_8N1, K_RX_PIN, K_TX_PIN);
-  vTaskDelay(pdMS_TO_TICKS(5));
-  while (KLine.available()) (void)KLine.read(); // Clear buffer
+
+  while (KLine.available()) (void)KLine.read();                 // clear any noise
+  KLine.flush();                                               // ensure TX idle
 }
 
 static size_t k_read_frame(uint8_t *out, size_t max_len, uint32_t timeout_ms) {
@@ -246,6 +266,8 @@ static bool start_communication_handshake() {
     return false;
   }
 
+  vTaskDelay(pdMS_TO_TICKS(FRAME_TIMEOUT_MS));
+
   // Wait for INIT response
   uint8_t resp1[MAX_FRAME];
   size_t n1 = k_read_frame(resp1, sizeof(resp1), FRAME_TIMEOUT_MS);
@@ -269,7 +291,7 @@ static bool start_communication_handshake() {
 
   // Step 2: Start Communication WITH SA=0x71 (your logged pattern: 00 18)
   logf("Handshake step 2: StartCommunication (with SA=0x71)\n");
-  const uint8_t cmd_start[] = { 0x00, 0x18 };
+  const uint8_t cmd_start[] = { 0x00 };
   if (!send_honda_req_with_sa(cmd_start, sizeof(cmd_start))) {
     logf("...StartCommunication send failed.\n");
     return false;
@@ -307,7 +329,7 @@ static void kline_task_code(void *pvParameters) {
     {0x73, 0x07}, {0x73, 0x08}, {0x73, 0x09}, {0x73, 0x0A}, {0x73, 0x0B},
     {0x74, 0x01}, {0x74, 0x02}, {0x74, 0x03}, {0x74, 0x04}, {0x74, 0x05}, {0x74, 0x06},
     {0x74, 0x07}, {0x74, 0x08}, {0x74, 0x09}, {0x74, 0x0A}, {0x74, 0x0B},
-    {0x71, 0x17}, {0x71, 0x20}, {0x71, 0x67}, {0x71, 0x70}, {0x71, 0xD0}, {0x71, 0xD1}
+    {0x71, 0x17}, {0x71, 0x20}, {0x71, 0x21}, {0x71, 0x67}, {0x71, 0x70}, {0x71, 0xD0}, {0x71, 0xD1}
   };
 
   uint8_t response_buf[MAX_FRAME];
@@ -379,7 +401,8 @@ void setup() {
   pinMode(K_TX_PIN, OUTPUT);
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  log_mutex = xSemaphoreCreateMutex();
+  // log_mutex = xSemaphoreCreateMutex();
+  log_queue = xQueueCreate(10, LOGBUF_SIZE);
 
   logf("\nESP32 Honda K-Line Logger\n");
   logf("Main setup running on Core %d\n", xPortGetCoreID());
@@ -406,16 +429,9 @@ void loop() {
   char local_buffer[LOGBUF_SIZE];
   local_buffer[0] = '\0';
 
-  if (log_mutex && xSemaphoreTake(log_mutex, (TickType_t)20) == pdTRUE) {
-    if (shared_log_buffer[0] != '\0') {
-      strncpy(local_buffer, shared_log_buffer, sizeof(local_buffer) - 1);
-      local_buffer[sizeof(local_buffer) - 1] = '\0';
-      shared_log_buffer[0] = '\0';
-    }
-    xSemaphoreGive(log_mutex);
-  }
-
-  if (local_buffer[0] != '\0') {
+  if (log_queue && xQueueReceive(log_queue, &local_buffer, (TickType_t)0) == pdPASS) {
     net_broadcast(local_buffer);
   }
+
+  vTaskDelay(pdMS_TO_TICKS(5));
 }
