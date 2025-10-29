@@ -5,11 +5,13 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 #define torque A0
 #define l1 4
 
-#define tx 1
-#define rx 0
-
 #define maxRpm 12000
 #define minRpm 800
+
+HardwareSerial &Serial10400 = Serial1; 
+const int K_RX_PIN = 0;
+const int K_TX_PIN = 1;
+#define K_SENSE_PIN K_RX_PIN 
 
 const float IAT_HEAT_RATE = 1.2f;
 const float IAT_COOL_RATE = 0.3f;
@@ -38,22 +40,22 @@ int ignitionTiming = 0;
 int ignitionDeg = 0;
 
 int lcdTime = 0;
-int lcdRate = 100;
+int lcdRate = 200;
 
 long timeSpeed = millis();
 long timeNow = 0;
 long ingnitionWait = 0;
 
 // ------------------------- ECU Variable -------------------------
-bool wakeup = false;
+bool wakeup = true;
 bool isInit = false;
 
 int sleepTimeMs = 5000;
 long ecuTimeoutTimeMs = millis();
 int interByteMs = 5;
-int interByteTimeoutMs = 50;
+int interByteTimeoutMs = 60;
 int interByteTimeMs = millis();
-int toleranceMs = 5;
+int toleranceMs = 20;
 
 int LOW_TIME = 70;
 int HIGH_TIME = 120;
@@ -149,21 +151,20 @@ static inline bool within(int val, int target, int tol) {
 
 static bool send_response(const uint8_t* d, size_t cap) {
   if (!d || cap < 3) return false;                  // [addr,len,data...]
-
   uint8_t byteData = d[1];                          // จำนวนไบต์ใน DATA
   size_t n_wo_cs = (size_t)2 + (size_t)byteData;    // addr + len + data(L)
-  if (n_wo_cs + 1 > cap) return false;              // ต้องมีพื้นที่พอสำหรับอ่านและต่อ checksum
+  // if (n_wo_cs + 1 > cap) return false;              // ต้องมีพื้นที่พอสำหรับอ่านและต่อ checksum
 
   uint8_t cs = kwp_checksum(d, n_wo_cs);
 
-  Serial.write(d, n_wo_cs);
-  Serial.write(&cs, 1);
-  Serial.flush();
+  Serial10400.write(d, n_wo_cs);
+  Serial10400.write(&cs, 1);
+  Serial10400.flush();
   return true;
 }
 
 void ECU_COMM() {
-  int level = digitalRead(rx);
+  int level = digitalRead(K_SENSE_PIN );
   unsigned long ecuMicros = micros();
   unsigned long ecuMs = millis();
 
@@ -216,10 +217,10 @@ void ECU_COMM() {
     }
   } else {
     if (ecuWakeStartMs == 0) ecuWakeStartMs = ecuMs;
-
-    if (Serial.available() > 0) {
-      int v = Serial.read();
-      if (v > 0) {
+  
+    while (Serial10400.available()) {
+      int v = Serial10400.read();
+      if (v >= 0) {
         if (rxLen < sizeof(rxBuf)) {
           rxBuf[rxLen++] = (uint8_t)v;
           lastByteMs = ecuMs;
@@ -233,9 +234,10 @@ void ECU_COMM() {
       bool ok = checksum_complete_frame(rxBuf, rxLen);
 
       if (ok) {
-        static const uint8_t FE_REQ[] = {0xFE, 0x04, 0x72, 0x8C};
+        static const uint8_t FE_REQ[] = {0x72, 0x05, 0x00, 0xF0, 0x99};
         if (rxLen == sizeof(FE_REQ) && memcmp(rxBuf, FE_REQ, sizeof(FE_REQ)) == 0) {
           static const uint8_t RESP[] = {0x0E, 0x04, 0x72};
+          delay(20);
           send_response(RESP, sizeof(RESP));
           isInit = true;
           ecuWakeStartMs = ecuMs;
@@ -256,7 +258,7 @@ void ECU_COMM() {
 
             payload[0] = (rpm >> 8) & 0xFF;   // ไบต์สูง (MSB)
             payload[1] = rpm & 0xFF;
-            payload[3] = u8(tps / 5.0f * 256);
+            payload[3] = u8(tps);
             payload[4] = u8f((ignitionDeg * 2) + 64.0f);
             payload[5] = u8f(temp_iat + 40);
             payload[7] = u8f(temp_ect + 40);
@@ -278,35 +280,47 @@ void ECU_COMM() {
       lastByteMs = 0;
     }
 
-    if (ecuMs - ecuWakeStartMs >= sleepTimeMs) {
-      wakeup = false;
-      ecuWakeStartMs = 0;
-      rxLen = 0;
-      lastByteMs = 0;
-    }
+    // เอาออก ละ ไม่อยากเพิ่ม Pin มาเช็ค pattern
+    // if (ecuMs - ecuWakeStartMs >= sleepTimeMs) {
+    //   wakeup = false;
+    //   ecuWakeStartMs = 0;
+    //   rxLen = 0;
+    //   lastByteMs = 0;
+    // }
   }
 }
 
 // ------------------------- SETUP & LOOP ZONE ------------------------- 
 
 void setup() {
-  Serial.begin(10400); // ISO14230 Honda ECU COMUNICATION RATE
+  // Serial.begin(9600); // ISO14230 Honda ECU COMUNICATION RATE
+  Serial10400.begin(10400);
 
   pinMode(btn , INPUT_PULLUP);
   pinMode(l1 , OUTPUT);
 
-  pinMode(tx, OUTPUT);
-  pinMode(rx, INPUT_PULLUP);
+  // pinMode(K_TX_PIN, OUTPUT);
+  // pinMode(K_SENSE_PIN , INPUT_PULLUP);
+
+  pinMode(13, OUTPUT);
 
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0);
   lcd.print("PRESS B TO START");
 
+  Serial.print(F("HI!\n"));
+  Serial10400.write(0xFF);
+  Serial10400.write(0xFF);
+  Serial10400.write(0xFF);
+  Serial10400.flush();
 }
 
 void loop() {
   timeNow = millis();
+
+  ECU_COMM();
+
   if (digitalRead(btn) == LOW && !start) {
     start = true;
     lcd.clear();
@@ -344,7 +358,6 @@ void loop() {
 
       tempSimulator();
       speedSimulator();
-      ECU_COMM();
       
       lcdTime = timeNow;
     }
