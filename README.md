@@ -32,7 +32,7 @@
 
 ### ฮาร์ดแวร์
 - **ESP32** ที่มี UART ฮาร์ดแวร์ (เช่น GPIO16=RX, GPIO17=TX)
-- **K-Line Transceiver** (เช่น L9637D / MC33660 / SI9243) สำหรับแปลงระดับ 3.3 V ↔ 12 V
+- **K-Line Optocou0per** (เช่น 4n25 , 4n35) สำหรับแยกระดับ 5 V ↔ 12 V
 - แหล่งจ่าย: 12 V → 5 V ด้วยเรกูเลเตอร์ที่เหมาะสม
 
 ![A1 Poster Image..](https://github.com/1REDfriend/Physical_compute_Project_1/blob/main/ECU%20HACKING.png)
