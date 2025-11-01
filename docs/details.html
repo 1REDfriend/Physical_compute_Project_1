@@ -44,6 +44,12 @@
     <div class="fixed top-0 left-0 w-full h-full bg-black/50 z-0"></div>
 
     <main class="container relative z-10">
+      <section class="section" id="code">
+        <h2 class="pb-10">Code Download</h2>
+        <a class="p-5 px-7 bg-white/20 rounded-lg border-1 border-white/30" href="https://download-directory.github.io/?url=https%3A%2F%2Fgithub.com%2F1REDfriend%2FPhysical_compute_Project_1%2Ftree%2Fmain%2FArduino%2FGetLiveData">GetLiveData.ino</a>,
+        <a class="p-5 px-7 bg-white/20 rounded-lg border-1 border-white/30" href="https://github.com/1REDfriend/Physical_compute_Project_1/blob/main/Arduino/ECU_SIMULATOR/ECU_SIMULATOR.ino">ECU Simulator.ino</a>
+      </section>
+
       <section class="section" id="introduction">
         <h2>Introduction</h2>
         <p>
@@ -393,15 +399,29 @@
   <section class="section" id="analysis">
     <h2>Analysis</h2>
     <p>
-      วิเคราะห์ผลลัพธ์ อธิบายความหมายทางเทคนิค ปัจจัยที่มีผล และการตีความ
+      จากการทดลองสื่อสารระหว่าง ESP32 กับ ECU ผ่าน K-Line (ISO 9141-2 / KWP2000) 
+      พบว่าสามารถทำการ Fast Initialization ได้สำเร็จภายใต้เงื่อนไขเวลามาตรฐาน (70 ms low, 120 ms high) 
+      และสามารถรับ–ส่งเฟรมข้อมูลด้วย baud rate 10400 bps ได้อย่างเสถียร การตอบสนองของ ECU แสดงให้เห็นถึงการ handshake ที่ถูกต้อง 
+      เช่น การตอบกลับด้วย header [0x0e, 0x04, 0x72] หรือรหัสสถานะจาก ECU หลังจากคำสั่ง “Start Communication”.
     </p>
   </section>
 
   <section class="section" id="conclusion">
     <h2>Conclusion &amp; Recommendations</h2>
+    <h3>Conclusion: </h3>
     <ul>
-      <li>สรุปสิ่งที่พบ</li>
-      <li>ข้อเสนอแนะเพื่อการปรับปรุง/งานต่อยอด</li>
+      <li>ระบบสามารถสื่อสารกับ ECU ผ่าน K-Line ได้อย่างถูกต้อง</li>
+      <li>การทำ fast-init ตาม timing มาตรฐานช่วยให้ ECU เริ่มต้น session ได้เสถียร</li>
+      <li>เฟรมข้อมูลที่มี checksum ถูกต้องทุกครั้งจะทำให้ ECU ตอบสนองตามที่คาดหมาย</li>
+      <li>การใช้วงจร transceiver ที่เหมาะสมช่วยลดปัญหา noise และปกป้องวงจร ESP32</li>
+    </ul>
+    <br>
+    <h3>Recommendations: </h3>
+    <ul>
+      <li>พัฒนาโมดูล Auto-detect Protocol: เพื่อให้ระบบสามารถตรวจจับประเภทโปรโตคอล (ISO 9141-2, KWP2000, CAN) ได้อัตโนมัติ</li>
+      <li>เพิ่มระบบ Logging: เก็บข้อมูลเฟรมที่ส่ง–รับในรูปแบบ CSV หรือ JSON สำหรับการวิเคราะห์ย้อนหลัง</li>
+      <li>ออกแบบ Dashboard แบบ Real-time: แสดงค่าพารามิเตอร์ เช่น RPM, TPS, IAT, ECT, Voltage แบบกราฟเพื่อใช้ในการวิเคราะห์สมรรถนะเครื่องยนต์</li>
+      <li>ทดสอบภาคสนามกับ ECU หลายรุ่น: เพื่อประเมินความเข้ากันได้ (Compatibility) ระหว่างยี่ห้อรถยนต์และปีผลิตต่างๆ</li>
     </ul>
   </section>
   </main>
