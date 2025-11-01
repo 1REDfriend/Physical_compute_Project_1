@@ -33,4 +33,4 @@
 - **K-Line Transceiver** (เช่น L9637D / MC33660 / SI9243) สำหรับแปลงระดับ 3.3 V ↔ 12 V
 - แหล่งจ่าย: 12 V → 5 V ด้วยเรกูเลเตอร์ที่เหมาะสม
 
-[](./ECU HACKING.png)
+![A1 Poster Image..](https://github.com/1REDfriend/Physical_compute_Project_1/blob/main/ECU%20HACKING.png)
