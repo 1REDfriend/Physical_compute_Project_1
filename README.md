@@ -4,7 +4,7 @@
 
 # Website
 
-(Web)[./Web]
+[GitHub Pages](./Web).
 
 ## Features
 
