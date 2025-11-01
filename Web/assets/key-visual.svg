@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="700" fill="#020617"/>
+  <g transform="translate(90,80)">
+    <rect x="0" y="0" width="1020" height="540" rx="24" fill="#0b1220" stroke="#1f2937"/>
+    <text x="40" y="80" fill="#a5f3fc" font-family="Inter,Segoe UI,Arial" font-size="46" font-weight="700">
+      ESP32 K-Line ECU Simulator
+    </text>
+    <text x="40" y="130" fill="#9ca3af" font-family="Inter,Segoe UI,Arial" font-size="22">
+      Key Visual Placeholder — replace this with your real hardware photo or system diagram.
+    </text>
+    <g transform="translate(40,180)">
+      <rect x="0" y="0" width="380" height="240" rx="16" fill="#0f172a" stroke="#1f2937"/>
+      <text x="20" y="40" fill="#e5e7eb" font-size="20" font-family="Inter">ESP32</text>
+      <rect x="20" y="60" width="340" height="8" fill="url(#g)"/>
+      <rect x="20" y="90" width="220" height="8" fill="url(#g)"/>
+      <rect x="20" y="120" width="300" height="8" fill="url(#g)"/>
+      <text x="20" y="170" fill="#9ca3af" font-size="16" font-family="Inter">K-Line</text>
+      <rect x="20" y="185" width="260" height="6" fill="#38bdf8" opacity=".6"/>
+    </g>
+    <g transform="translate(480,180)">
+      <rect x="0" y="0" width="500" height="240" rx="16" fill="#0f172a" stroke="#1f2937"/>
+      <text x="20" y="40" fill="#e5e7eb" font-size="20" font-family="Inter">ECU Simulator Blocks</text>
+      <circle cx="80" cy="120" r="36" fill="url(#g)"/>
+      <circle cx="200" cy="120" r="36" fill="#38bdf8"/>
+      <circle cx="320" cy="120" r="36" fill="#22d3ee"/>
+      <circle cx="440" cy="120" r="36" fill="#7dd3fc"/>
+      <text x="60" y="172" fill="#9ca3af" font-size="14" font-family="Inter">UART</text>
+      <text x="184" y="172" fill="#9ca3af" font-size="14" font-family="Inter">KWP2000</text>
+      <text x="302" y="172" fill="#9ca3af" font-size="14" font-family="Inter">Parser</text>
+      <text x="426" y="172" fill="#9ca3af" font-size="14" font-family="Inter">Web UI</text>
+    </g>
+  </g>
+</svg>

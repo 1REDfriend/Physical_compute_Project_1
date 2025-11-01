@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="th">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 K-Line ECU Simulator — Home</title>
+  <link rel="stylesheet" href="assets/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun&display=swap" rel="stylesheet">
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"
+    integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cts=" crossorigin="anonymous"></script>
+  <script src="assets/app.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style>
+    .nav a.active {
+      outline: 2px solid rgba(56, 189, 248, .5);
+      border-radius: 8px
+    }
+  </style>
+  <link rel="stylesheet" href="index.css">
+</head>
+
+<body>
+  <div id="cursor" aria-hidden="true">
+    <svg width="48" height="48" viewBox="0 0 48 48">
+      <g class="spin" stroke="black" stroke-width="3" stroke-linecap="round" fill="none">
+        <!-- <path d="M12 14 v8 M12 14 h8" />
+        <path d="M36 14 v8 M36 14 h-8" />
+        <path d="M12 34 v-8 M12 34 h8" />
+        <path d="M36 34 v-8 M36 34 h-8" /> -->
+
+        <!-- <circle cx="24" cy="24" r="2.5" fill="black" /> -->
+      </g>
+    </svg>
+  </div>
+  <header class="navbar">
+    <div class="inner">
+      <div class="brand">
+        <i class="logo"></i><span>ESP32 K-Line ECU Simulator</span>
+      </div>
+      <nav class="nav">
+        <a data-page="index.html" href="index.html">Home</a>
+        <a data-page="details.html" href="details.html">Project Details</a>
+        <a href="https://github.com/1REDfriend/Physical_compute_Project_1" target="_repo" class="cta">Source Code
+          (GitHub)</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="relative overflow-hidden">
+    <video autoplay loop muted playsinline class="absolute top-0 left-0 w-screen h-screen object-cover z-0">
+      <source src="assets/video1.mp4" type="video/mp4">
+    </video>
+
+    <div class="absolute top-0 left-0 w-full h-full bg-black/50 z-0"></div>
+
+    <main class="container hero h-[calc(100vh-200px)] relative z-10">
+      <div class="">
+        <h1>ESP32 K-Line ECU Simulator</h1>
+        <p class="subtitle">Author(s): Moto GP Academy.</p>
+
+        <section class="kv">
+          <div class="card">
+            <h3 class="text-xl font-bold">Abstract บทคัดย่อ</h3>
+            <p class="mb-5 ml-3">
+              บทคัดย่อนี้สรุปการพัฒนา ECU Simulator บนแพลตฟอร์ม ESP32 โดยใช้ Arduino Framework (C++)
+            </p>
+            <p>
+              เพื่อจำลองโปรโตคอล K-Line (ISO 9141/14230)
+            </p>
+            <p>
+              การดำเนินงานมุ่งเน้นไปที่การจำลองกระบวนการ 5-Baud Initialization และ Keyword Protocol (KWP2000)
+            </p>
+            <p class="mb-3">
+              ผลการวิเคราะห์ Log การสื่อสารเผยให้เห็นความท้าทายหลัก 3 ประการ:
+            </p>
+            <p class="ml-3">
+              1) ความซับซ้อนและความอ่อนไหวของ Timing ในกระบวนการ Initialization
+            </p>
+            <p class="ml-3">
+              2) ความจำเป็นในการกำหนดค่า HardwareSerial ของ ESP32 อย่างถูกต้อง (Baud rate, Inverted logic) และ
+            </p>
+            <p class="ml-3">
+              3) ความล้มเหลวในการสื่อสารอันเนื่องมาจากการคำนวณ Checksum ที่ผิดพลาด
+              แม้ว่าโปรโตคอลจะจำลองได้ แต่ก็สรุปได้ว่ามีความเปราะบางและต้องปรับปรุงเพื่อรองรับการทดสอบเครื่องมือวินิจฉัย
+              (Diagnostic Tool Testing) ที่สมบูรณ์
+            </p>
+            <div class="btns pt-10">
+              <a class="btn" href="details.html">อ่านรายละเอียด (Project Details)</a>
+              <a class="btn" href="https://github.com/1REDfriend/Physical_compute_Project_1" target="_repo">ดูโค้ดบน
+                GitHub</a>
+            </div>
+          </div>
+          <div>
+            <iframe width="480" height="280" src="https://www.youtube.com/embed/srPXrsJyhoA?autoplay=0&mute=1">
+            </iframe>
+          </div>
+        </section>
+      </div>
+    </main>
+
+  </div>
+
+  <footer class="footer">
+    © <span id="year"></span> Moto GP Academy — ESP32 K-Line ECU Simulator
+  </footer>
+
+  <script>
+    document.getElementById('year').textContent = new Date().getFullYear();
+  </script>
+  <script src="./p_aom_cursor.js"></script>
+</body>
+
+</html>
