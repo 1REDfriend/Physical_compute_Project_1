@@ -16,6 +16,7 @@
 - **Real-time Dashboard (พื้นฐาน)**: แสดงข้อมูลสด (ตัวอย่าง gauge/log)
 
 > หมายเหตุ: ตัด ISO 15765-4 (CAN) ออก
+
 > หมายเหตุ: ตัด การ fastInit ออก
 
 ### Phase 2 – Advanced
