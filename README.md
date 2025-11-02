@@ -10,6 +10,12 @@
 
 เครื่องมืออ่าน/จำลอง OBD-II ผ่าน K-Line ด้วย ESP32: โฟกัสการสื่อสารแบบ ISO 9141-2 และ ISO 14230-4 (KWP2000) รองรับการดูข้อมูลสด บันทึกข้อมูล และเชื่อมต่อได้หลายวิธี
 
+## Code Introduction
+
+ตัวโค้ดจะมีอยู่ 2 ส่วนคือ 
+1. GetLiveData คือโค้ดของ ESP32 ใช้จำลองการดึงค่าจาก ECU Honda
+2. ECU_SIMULATOR คือโค้ดของ Arduino R4 จำลองการเป็น ECU Honda ESP32 จะต้องส่ง Request มาหาเพื่อรับข้อมูล
+
 # Website
 
 <a href="https://1redfriend.github.io/Physical_compute_Project_1/" target="blank">
@@ -41,6 +47,8 @@
 - **DTC Viewer**: อ่าน/แสดงรหัสปัญหา (Diagnostic Trouble Codes)
 - **Data Logging**: บันทึก CSV/JSON/ไบนารี (พร้อม timestamp)
 - **Connection Manager**: สลับ/จัดการแหล่งเชื่อมต่อ (ESP32 UART / Wi-Fi / FTDI)
+
+<img  height="500" alt="image" src="https://github.com/user-attachments/assets/ea617b56-8ae9-40d1-b275-31035307d589" />
 
 ### Phase 3 – Polish & Optimization
 - **Export/Import**: ส่งออก CSV/JSON/HTML/PDF และนำเข้าไฟล์บันทึก
